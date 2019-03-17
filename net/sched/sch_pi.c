@@ -523,7 +523,7 @@ nla_put_failure:
 static int pi_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 {
 	struct pi_sched_data *q = qdisc_priv(sch);
-	struct tc_pie_xstats st = { // GURU: TODO: Find definition of this structure and modify it for PI
+	struct tc_pi_xstats st = { // GURU: TODO: Added the definition for PI in /include/uapi/linux/pkt_sched.c Need to verify if all params are needed
 		.prob		= q->vars.prob,
 		.delay		= ((u32)PSCHED_TICKS2NS(q->vars.qdelay)) /
 				   NSEC_PER_USEC,
