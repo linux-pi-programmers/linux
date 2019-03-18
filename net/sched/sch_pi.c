@@ -1,4 +1,4 @@
-/* Copyright (C) 2013 Cisco Systems, Inc, 2013.
+/* Copyright (C) 2019 WiNG NITK Surathkal, India
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -10,14 +10,13 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * Author: Vijay Subramanian <vijaynsu@cisco.com>
- * Author: Mythili Prabhu <mysuryan@cisco.com>
- *
- * ECN support is added by Naeem Khademi <naeemk@ifi.uio.no>
- * University of Oslo, Norway.
- *
+ * Author: Gurupungav Narayanan <gurupungavn@gmail.com>
+ * Author: Suraj Singh <suraj1998@gmail.com>
+ * Author: Adwaith Gautham <adwait.gautham@gmail.com>
+ * 
  * References:
- * RFC 8033: https://tools.ietf.org/html/rfc8033
+ * On designing improved controllers for AQM routers supporting TCP flows
+ * DOI: 10.1109/INFCOM.2001.916670
  */
 
 #include <linux/module.h>
@@ -36,7 +35,8 @@
 
 /* parameters used */
 struct pi_params {
-	psched_time_t target;	/* user specified target delay in pschedtime */
+	// psched_time_t target;	/* user specified target delay in pschedtime */
+	u32 target;
 	u32 tupdate;		/* timer frequency (in jiffies) */
 	u32 limit;		/* number of packets that can be enqueued */
 	u32 alpha;		/* alpha and beta are between 0 and 32 */
@@ -48,15 +48,7 @@ struct pi_params {
 /* variables used */
 struct pi_vars {
 	u64 prob;		/* probability but scaled by u64 limit. */
-	// psched_time_t burst_time; /* GURU: burst_time isn't required by PI*/
-	psched_time_t qdelay;
-	psched_time_t qdelay_old;
-	u64 dq_count;		/* measured in bytes */
-	psched_time_t dq_tstamp;	/* drain rate */
-	u64 accu_prob;		/* accumulated drop probability */
-	u32 avg_dq_rate;	/* bytes per pschedtime tick,scaled */
 	u32 qlen_old;		/* in bytes */
-	u8 accu_prob_overflows;	/* overflows of accu_prob */
 };
 
 /* statistics gathering */
@@ -79,46 +71,23 @@ struct pi_sched_data {
 
 static void pi_params_init(struct pi_params *params)
 {
-	params->alpha = 2;
+	params->alpha = 2; /* Needs to be updated*/
 	params->beta = 20;
-	params->tupdate = usecs_to_jiffies(15 * USEC_PER_MSEC);	/* 15 ms */
+	params->tupdate = usecs_to_jiffies(625 * USEC_PER_MSEC / 1000);	/* 15 ms */
 	params->limit = 1000;	/* default of 1000 packets */
-	params->target = PSCHED_NS2TICKS(15 * NSEC_PER_MSEC);	/* 15 ms */
+	params->target = 10; /* needs to be updated */
 	params->ecn = false;
 	params->bytemode = false;
 }
 
-static void pi_vars_init(struct pi_vars *vars)
-{
-	vars->dq_count = DQCOUNT_INVALID;
-	vars->accu_prob = 0;
-	vars->avg_dq_rate = 0;
-	/* default of 150 ms in pschedtime */
-	// vars->burst_time = PSCHED_NS2TICKS(150 * NSEC_PER_MSEC); /* GURU: removing burst_time init for PI
-	vars->accu_prob_overflows = 0;
-}
 
 static bool drop_early(struct Qdisc *sch, u32 packet_size)
 {
 	struct pi_sched_data *q = qdisc_priv(sch);
 	u64 rnd;
 	u64 local_prob = q->vars.prob;
+	// Shouldn't we do q->vars.prob = 0 in pi_vars_init() ?
 	u32 mtu = psched_mtu(qdisc_dev(sch));
-
-	
-	/* If there is still burst allowance left skip random early drop */
-	/* GURU: Removing burst_time check for PI in drop_early */
-	/*
-	if (q->vars.burst_time > 0)
-		return false;
-	*/
-
-	/* If current delay is less than half of target, and
-	 * if drop prob is low already, disable early_drop
-	 */
-	if ((q->vars.qdelay < q->params.target / 2) &&
-	    (q->vars.prob < MAX_PROB / 5))
-		return false;
 
 	/* If we have fewer than 2 mtu-sized packets, disable drop_early,
 	 * similar to min_th in RED
@@ -134,27 +103,8 @@ static bool drop_early(struct Qdisc *sch, u32 packet_size)
 	else
 		local_prob = q->vars.prob;
 
-	if (local_prob == 0) {
-		q->vars.accu_prob = 0;
-		q->vars.accu_prob_overflows = 0;
-	}
-
-	if (local_prob > MAX_PROB - q->vars.accu_prob)
-		q->vars.accu_prob_overflows++;
-
-	q->vars.accu_prob += local_prob;
-
-	if (q->vars.accu_prob_overflows == 0 &&
-	    q->vars.accu_prob < (MAX_PROB / 100) * 85)
-		return false;
-	if (q->vars.accu_prob_overflows == 8 &&
-	    q->vars.accu_prob >= MAX_PROB / 2)
-		return true;
-
 	prandom_bytes(&rnd, 8);
 	if (rnd < local_prob) {
-		q->vars.accu_prob = 0;
-		q->vars.accu_prob_overflows = 0;
 		return true;
 	}
 
@@ -174,11 +124,8 @@ static int pi_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 
 	if (!drop_early(sch, skb->len)) {
 		enqueue = true;
-	} else if (q->params.ecn && (q->vars.prob <= MAX_PROB / 10) &&
-		   INET_ECN_set_ce(skb)) {
-		/* If packet is ecn capable, mark it if drop probability
-		 * is lower than 10%, else drop it.
-		 */
+	} else if (q->params.ecn && INET_ECN_set_ce(skb)) {
+		/* If packet is ecn capable, mark it */
 		q->stats.ecn_mark++;
 		enqueue = true;
 	}
@@ -194,8 +141,6 @@ static int pi_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 
 out:
 	q->stats.dropped++;
-	q->vars.accu_prob = 0;
-	q->vars.accu_prob_overflows = 0;
 	return qdisc_drop(skb, sch, to_free);
 }
 
@@ -228,11 +173,7 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 
 	/* convert from microseconds to pschedtime */
 	if (tb[TCA_PI_TARGET]) {
-		/* target is in us */
-		u32 target = nla_get_u32(tb[TCA_PI_TARGET]);
-
-		/* convert to pschedtime */
-		q->params.target = PSCHED_NS2TICKS((u64)target * NSEC_PER_USEC);
+		q->params.target = nla_get_u32(tb[TCA_PI_TARGET]);
 	}
 
 	/* tupdate is in jiffies */
@@ -274,96 +215,18 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 	return 0;
 }
 
-static void pi_process_dequeue(struct Qdisc *sch, struct sk_buff *skb)
-{
-	struct pi_sched_data *q = qdisc_priv(sch);
-	int qlen = sch->qstats.backlog;	/* current queue size in bytes */
-
-	/* If current queue is about 10 packets or more and dq_count is unset
-	 * we have enough packets to calculate the drain rate. Save
-	 * current time as dq_tstamp and start measurement cycle.
-	 */
-	if (qlen >= QUEUE_THRESHOLD && q->vars.dq_count == DQCOUNT_INVALID) {
-		q->vars.dq_tstamp = psched_get_time();
-		q->vars.dq_count = 0;
-	}
-
-	/* Calculate the average drain rate from this value.  If queue length
-	 * has receded to a small value viz., <= QUEUE_THRESHOLD bytes,reset
-	 * the dq_count to -1 as we don't have enough packets to calculate the
-	 * drain rate anymore The following if block is entered only when we
-	 * have a substantial queue built up (QUEUE_THRESHOLD bytes or more)
-	 * and we calculate the drain rate for the threshold here.  dq_count is
-	 * in bytes, time difference in psched_time, hence rate is in
-	 * bytes/psched_time.
-	 */
-	if (q->vars.dq_count != DQCOUNT_INVALID) {
-		q->vars.dq_count += skb->len;
-
-		if (q->vars.dq_count >= QUEUE_THRESHOLD) {
-			psched_time_t now = psched_get_time();
-			u32 dtime = now - q->vars.dq_tstamp;
-			u32 count = q->vars.dq_count << PI_SCALE;
-
-			if (dtime == 0)
-				return;
-
-			count = count / dtime;
-
-			if (q->vars.avg_dq_rate == 0)
-				q->vars.avg_dq_rate = count;
-			else
-				q->vars.avg_dq_rate =
-				    (q->vars.avg_dq_rate -
-				     (q->vars.avg_dq_rate >> 3)) + (count >> 3);
-
-			/* If the queue has receded below the threshold, we hold
-			 * on to the last drain rate calculated, else we reset
-			 * dq_count to 0 to re-enter the if block when the next
-			 * packet is dequeued
-			 */
-			if (qlen < QUEUE_THRESHOLD) {
-				q->vars.dq_count = DQCOUNT_INVALID;
-			} else {
-				q->vars.dq_count = 0;
-				q->vars.dq_tstamp = psched_get_time();
-			}
-			/*
-			if (q->vars.burst_time > 0) {
-				if (q->vars.burst_time > dtime)
-					q->vars.burst_time -= dtime;
-				else
-					q->vars.burst_time = 0;
-			}
-			*/ /* GURU: Removed burst_time reset */
-		}
-	}
-}
-
 static void calculate_probability(struct Qdisc *sch)
 {
 	struct pi_sched_data *q = qdisc_priv(sch);
 	u32 qlen = sch->qstats.backlog;	/* queue size in bytes */
-	psched_time_t qdelay = 0;	/* in pschedtime */
-	psched_time_t qdelay_old = q->vars.qdelay;	/* in pschedtime */
+	u32 qlen_old = q->vars.qlen_old;	
 	s64 delta = 0;		/* determines the change in probability */
 	u64 oldprob;
 	u64 alpha, beta;
 	u32 power;
 	bool update_prob = true;
 
-	q->vars.qdelay_old = q->vars.qdelay;
-
-	if (q->vars.avg_dq_rate > 0)
-		qdelay = (qlen << PI_SCALE) / q->vars.avg_dq_rate;
-	else
-		qdelay = 0;
-
-	/* If qdelay is zero and qlen is not, it means qlen is very small, less
-	 * than dequeue_rate, so we do not update probabilty in this round
-	 */
-	if (qdelay == 0 && qlen != 0)
-		update_prob = false;
+	q->vars.qlen_old = q->vars.qlen;
 
 	/* In the algorithm, alpha and beta are between 0 and 2 with typical
 	 * value for alpha as 0.125. In this implementation, we use values 0-32
@@ -372,43 +235,14 @@ static void calculate_probability(struct Qdisc *sch)
 	 * probability. alpha/beta are updated locally below by scaling down
 	 * by 16 to come to 0-2 range.
 	 */
-	alpha = ((u64)q->params.alpha * (MAX_PROB / PSCHED_TICKS_PER_SEC)) >> 4;
+	alpha = ((u64)q->params.alpha * (MAX_PROB / PSCHED_TICKS_PER_SEC)) >> 4; // SURAJ: needs to be changed to length
 	beta = ((u64)q->params.beta * (MAX_PROB / PSCHED_TICKS_PER_SEC)) >> 4;
 
-	/* We scale alpha and beta differently depending on how heavy the
-	 * congestion is. Please see RFC 8033 for details.
-	 */
-	if (q->vars.prob < MAX_PROB / 10) {
-		alpha >>= 1;
-		beta >>= 1;
-
-		power = 100;
-		while (q->vars.prob < div_u64(MAX_PROB, power) &&
-		       power <= 1000000) {
-			alpha >>= 2;
-			beta >>= 2;
-			power *= 10;
-		}
-	}
-
 	/* alpha and beta should be between 0 and 32, in multiples of 1/16 */
-	delta += alpha * (u64)(qdelay - q->params.target);
-	delta += beta * (u64)(qdelay - qdelay_old);
+	delta += alpha * (u64)(qlen - q->params.target);
+	delta -= beta * (u64)(qlen_old - q->params.target);
 
 	oldprob = q->vars.prob;
-
-	/* to ensure we increase probability in steps of no more than 2% */
-	if (delta > (s64)(MAX_PROB / (100 / 2)) &&
-	    q->vars.prob >= MAX_PROB / 10)
-		delta = (MAX_PROB / 100) * 2;
-
-	/* Non-linear drop:
-	 * Tune drop probability to increase quickly for high delays(>= 250ms)
-	 * 250ms is derived through experiments and provides error protection
-	 */
-
-	if (qdelay > (PSCHED_NS2TICKS(250 * NSEC_PER_MSEC)))
-		delta += MAX_PROB / (100 / 2);
 
 	q->vars.prob += delta;
 
@@ -429,28 +263,7 @@ static void calculate_probability(struct Qdisc *sch)
 			q->vars.prob = 0;
 	}
 
-	/* Non-linear drop in probability: Reduce drop probability quickly if
-	 * delay is 0 for 2 consecutive Tupdate periods.
-	 */
-
-	if (qdelay == 0 && qdelay_old == 0 && update_prob)
-		/* Reduce drop probability to 98.4% */
-		q->vars.prob -= q->vars.prob / 64u;
-
-	q->vars.qdelay = qdelay;
 	q->vars.qlen_old = qlen;
-
-	/* We restart the measurement cycle if the following conditions are met
-	 * 1. If the delay has been low for 2 consecutive Tupdate periods
-	 * 2. Calculated drop probability is zero
-	 * 3. We have atleast one estimate for the avg_dq_rate ie.,
-	 *    is a non-zero value
-	 */
-	if ((q->vars.qdelay < q->params.target / 2) &&
-	    (q->vars.qdelay_old < q->params.target / 2) &&
-	    q->vars.prob == 0 &&
-	    q->vars.avg_dq_rate > 0)
-		pi_vars_init(&q->vars);
 }
 
 static void pi_timer(struct timer_list *t)
@@ -474,7 +287,6 @@ static int pi_init(struct Qdisc *sch, struct nlattr *opt,
 	struct pi_sched_data *q = qdisc_priv(sch);
 
 	pi_params_init(&q->params);
-	pi_vars_init(&q->vars);
 	sch->limit = q->params.limit;
 
 	q->sch = sch;
@@ -500,10 +312,7 @@ static int pi_dump(struct Qdisc *sch, struct sk_buff *skb)
 	if (!opts)
 		goto nla_put_failure;
 
-	/* convert target from pschedtime to us */
-	if (nla_put_u32(skb, TCA_PI_TARGET,
-			((u32)PSCHED_TICKS2NS(q->params.target)) /
-			NSEC_PER_USEC) ||
+	if (nla_put_u32(skb, TCA_PI_TARGET, q->params.target) ||
 	    nla_put_u32(skb, TCA_PI_LIMIT, sch->limit) ||
 	    nla_put_u32(skb, TCA_PI_TUPDATE,
 			jiffies_to_usecs(q->params.tupdate)) ||
@@ -523,13 +332,8 @@ nla_put_failure:
 static int pi_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 {
 	struct pi_sched_data *q = qdisc_priv(sch);
-	struct tc_pi_xstats st = { // GURU: TODO: Added the definition for PI in /include/uapi/linux/pkt_sched.c Need to verify if all params are needed
+	struct tc_pi_xstats st = { // Need to verify if all params are needed
 		.prob		= q->vars.prob,
-		.delay		= ((u32)PSCHED_TICKS2NS(q->vars.qdelay)) /
-				   NSEC_PER_USEC,
-		/* unscale and return dq_rate in bytes per sec */
-		.avg_dq_rate	= q->vars.avg_dq_rate *
-				  (PSCHED_TICKS_PER_SEC) >> PI_SCALE,
 		.packets_in	= q->stats.packets_in,
 		.overlimit	= q->stats.overlimit,
 		.maxq		= q->stats.maxq,
@@ -547,7 +351,7 @@ static struct sk_buff *pi_qdisc_dequeue(struct Qdisc *sch)
 	if (!skb)
 		return NULL;
 
-	pi_process_dequeue(sch, skb);
+	// pi_process_dequeue(sch, skb);
 	return skb;
 }
 
@@ -556,7 +360,6 @@ static void pi_reset(struct Qdisc *sch)
 	struct pi_sched_data *q = qdisc_priv(sch);
 
 	qdisc_reset_queue(sch);
-	pi_vars_init(&q->vars);
 }
 
 static void pi_destroy(struct Qdisc *sch)
@@ -571,7 +374,7 @@ static struct Qdisc_ops pi_qdisc_ops __read_mostly = {
 	.id = "pi",
 	.priv_size	= sizeof(struct pi_sched_data),
 	.enqueue	= pi_qdisc_enqueue,
-	.dequeue	= pi_qdisc_dequeue,
+	// .dequeue	= pi_qdisc_dequeue,
 	.peek		= qdisc_peek_dequeued,
 	.init		= pi_init,
 	.destroy	= pi_destroy,
@@ -595,7 +398,8 @@ static void __exit pi_module_exit(void)
 module_init(pi_module_init);
 module_exit(pi_module_exit);
 
-MODULE_DESCRIPTION("Proportional Integral controller Enhanced (PIE) scheduler");
-MODULE_AUTHOR("Vijay Subramanian");
-MODULE_AUTHOR("Mythili Prabhu");
+MODULE_DESCRIPTION("Proportional Integral controller (PI) scheduler");
+MODULE_AUTHOR("Gurupungav Narayanan");
+MODULE_AUTHOR("Adwaith Gautham")
+MODULE_AUTHOR("Suraj Singh");
 MODULE_LICENSE("GPL");
