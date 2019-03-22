@@ -1,4 +1,4 @@
-/* Copyright (C) 2019 WiNG NITK Surathkal, India
+/* Copyright (C) 2019 WiNG NITK Surathkal
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -13,7 +13,7 @@
  * Author: Gurupungav Narayanan <gurupungavn@gmail.com>
  * Author: Suraj Singh <suraj1998@gmail.com>
  * Author: Adwaith Gautham <adwait.gautham@gmail.com>
- * 
+ *
  * References:
  * On designing improved controllers for AQM routers supporting TCP flows
  * DOI: 10.1109/INFCOM.2001.916670
@@ -35,7 +35,6 @@
 
 /* parameters used */
 struct pi_params {
-	// psched_time_t target;	/* user specified target delay in pschedtime */
 	u32 target;
 	u32 tupdate;		/* timer frequency (in jiffies) */
 	u32 limit;		/* number of packets that can be enqueued */
@@ -104,9 +103,8 @@ static bool drop_early(struct Qdisc *sch, u32 packet_size)
 		local_prob = q->vars.prob;
 
 	prandom_bytes(&rnd, 8);
-	if (rnd < local_prob) {
+	if (rnd < local_prob)
 		return true;
-	}
 
 	return false;
 }
@@ -172,9 +170,8 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 	sch_tree_lock(sch);
 
 	/* convert from microseconds to pschedtime */
-	if (tb[TCA_PI_TARGET]) {
+	if (tb[TCA_PI_TARGET])
 		q->params.target = nla_get_u32(tb[TCA_PI_TARGET]);
-	}
 
 	/* tupdate is in jiffies */
 	if (tb[TCA_PI_TUPDATE])
@@ -219,7 +216,7 @@ static void calculate_probability(struct Qdisc *sch)
 {
 	struct pi_sched_data *q = qdisc_priv(sch);
 	u32 qlen = sch->qstats.backlog;	/* queue size in bytes */
-	u32 qlen_old = q->vars.qlen_old;	
+	u32 qlen_old = q->vars.qlen_old;
 	s64 delta = 0;		/* determines the change in probability */
 	u64 oldprob;
 	u64 alpha, beta;
