@@ -32,6 +32,7 @@
 #define DQCOUNT_INVALID -1
 #define MAX_PROB 0xffffffffffffffff
 #define PI_SCALE 8
+#define PARAMETER_SCALE 100000000
 
 /* parameters used */
 struct pi_params {
@@ -70,11 +71,11 @@ struct pi_sched_data {
 
 static void pi_params_init(struct pi_params *params)
 {
-	params->alpha = 2; /* Needs to be updated*/
-	params->beta = 20;
-	params->tupdate = usecs_to_jiffies(625 * USEC_PER_MSEC / 1000);	/* 15 ms */
+	params->alpha = 1822;
+	params->beta = 1816;
+	params->tupdate = usecs_to_jiffies(625 * USEC_PER_MSEC / 1000);	/* 6.25 ms */
 	params->limit = 1000;	/* default of 1000 packets */
-	params->target = 10; /* needs to be updated */
+	params->target = 50; /* correct value, but is it packets */
 	params->ecn = false;
 	params->bytemode = false;
 }
@@ -169,7 +170,7 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 
 	sch_tree_lock(sch);
 
-	/* convert from microseconds to pschedtime */
+	/* should be number of packets */
 	if (tb[TCA_PI_TARGET])
 		q->params.target = nla_get_u32(tb[TCA_PI_TARGET]);
 
@@ -185,9 +186,11 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 		sch->limit = limit;
 	}
 
+	/* needs to be scaled */
 	if (tb[TCA_PI_ALPHA])
 		q->params.alpha = nla_get_u32(tb[TCA_PI_ALPHA]);
 
+	/* needs to be scaled */
 	if (tb[TCA_PI_BETA])
 		q->params.beta = nla_get_u32(tb[TCA_PI_BETA]);
 
@@ -215,15 +218,14 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 static void calculate_probability(struct Qdisc *sch)
 {
 	struct pi_sched_data *q = qdisc_priv(sch);
-	u32 qlen = sch->qstats.backlog;	/* queue size in bytes */
+	u32 qlen = qdisc_qlen(sch);	/* queue size in bytes */
 	u32 qlen_old = q->vars.qlen_old;
 	s64 delta = 0;		/* determines the change in probability */
 	u64 oldprob;
 	u64 alpha, beta;
-	u32 power;
 	bool update_prob = true;
 
-	q->vars.qlen_old = q->vars.qlen;
+	q->vars.qlen_old = qlen;
 
 	/* In the algorithm, alpha and beta are between 0 and 2 with typical
 	 * value for alpha as 0.125. In this implementation, we use values 0-32
@@ -232,8 +234,8 @@ static void calculate_probability(struct Qdisc *sch)
 	 * probability. alpha/beta are updated locally below by scaling down
 	 * by 16 to come to 0-2 range.
 	 */
-	alpha = ((u64)q->params.alpha * (MAX_PROB / PSCHED_TICKS_PER_SEC)) >> 4; // SURAJ: needs to be changed to length
-	beta = ((u64)q->params.beta * (MAX_PROB / PSCHED_TICKS_PER_SEC)) >> 4;
+	alpha = ((u64)q->params.alpha * (MAX_PROB)) / PARAMETER_SCALE; 
+	beta = ((u64)q->params.beta * (MAX_PROB)) / PARAMETER_SCALE;
 
 	/* alpha and beta should be between 0 and 32, in multiples of 1/16 */
 	delta += alpha * (u64)(qlen - q->params.target);
@@ -354,7 +356,6 @@ static struct sk_buff *pi_qdisc_dequeue(struct Qdisc *sch)
 
 static void pi_reset(struct Qdisc *sch)
 {
-	struct pi_sched_data *q = qdisc_priv(sch);
 
 	qdisc_reset_queue(sch);
 }
@@ -371,7 +372,7 @@ static struct Qdisc_ops pi_qdisc_ops __read_mostly = {
 	.id = "pi",
 	.priv_size	= sizeof(struct pi_sched_data),
 	.enqueue	= pi_qdisc_enqueue,
-	// .dequeue	= pi_qdisc_dequeue,
+	.dequeue	= pi_qdisc_dequeue,
 	.peek		= qdisc_peek_dequeued,
 	.init		= pi_init,
 	.destroy	= pi_destroy,
@@ -397,6 +398,6 @@ module_exit(pi_module_exit);
 
 MODULE_DESCRIPTION("Proportional Integral controller (PI) scheduler");
 MODULE_AUTHOR("Gurupungav Narayanan");
-MODULE_AUTHOR("Adwaith Gautham")
+MODULE_AUTHOR("Adwaith Gautham");
 MODULE_AUTHOR("Suraj Singh");
 MODULE_LICENSE("GPL");
