@@ -234,7 +234,7 @@ static void calculate_probability(struct Qdisc *sch)
 	 * probability. alpha/beta are updated locally below by scaling down
 	 * by 16 to come to 0-2 range.
 	 */
-	alpha = ((u64)q->params.alpha * (MAX_PROB)) / PARAMETER_SCALE; 
+	alpha = ((u64)q->params.alpha * (MAX_PROB)) / PARAMETER_SCALE;
 	beta = ((u64)q->params.beta * (MAX_PROB)) / PARAMETER_SCALE;
 
 	/* alpha and beta should be between 0 and 32, in multiples of 1/16 */
