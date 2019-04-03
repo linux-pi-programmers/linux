@@ -1,4 +1,4 @@
-/* Copyright (C) 2019 WiNG NITK Surathkal
+/* Copyright (C) 2019 WiNG, NITK Surathkal
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,19 +28,17 @@
 #include <net/pkt_sched.h>
 #include <net/inet_ecn.h>
 
-#define QUEUE_THRESHOLD 16384
-#define DQCOUNT_INVALID -1
 #define MAX_PROB 0xffffffffffffffff
 #define PI_SCALE 8
 #define PARAMETER_SCALE 100000000
 
 /* parameters used */
 struct pi_params {
-	u32 target;
-	u32 tupdate;		/* timer frequency (in jiffies) */
+	u32 qref;   /* reference queue length in packets */
+	u32 w;		/* timer frequency (in jiffies) */
 	u32 limit;		/* number of packets that can be enqueued */
-	u32 alpha;		/* alpha and beta are between 0 and 32 */
-	u32 beta;		/* and are used for shift relative to 1 */
+	u32 a;		/* a and b are between 0 and 32 */
+	u32 b;		/* and are used for shift relative to 1 */
 	bool ecn;		/* true if ecn is enabled */
 	bool bytemode;		/* to scale drop early prob based on pkt size */
 };
@@ -53,6 +51,7 @@ struct pi_vars {
 
 /* statistics gathering */
 struct pi_stats {
+	u32 qlen;		/* instantaneous qlen in packets */
 	u32 packets_in;		/* total number of packets enqueued */
 	u32 dropped;		/* packets dropped due to pi_action */
 	u32 overlimit;		/* dropped due to lack of space in queue */
@@ -71,11 +70,11 @@ struct pi_sched_data {
 
 static void pi_params_init(struct pi_params *params)
 {
-	params->alpha = 1822;
-	params->beta = 1816;
-	params->tupdate = usecs_to_jiffies(625 * USEC_PER_MSEC / 1000);	/* 6.25 ms */
+	params->a = 1822;
+	params->b = 1816;
+	params->w = usecs_to_jiffies(625 * USEC_PER_MSEC / 1000);	/* 6.25 ms */
 	params->limit = 1000;	/* default of 1000 packets */
-	params->target = 50; /* correct value, but is it packets */
+	params->qref = 50; /* reference queue length in packets */
 	params->ecn = false;
 	params->bytemode = false;
 }
@@ -86,14 +85,7 @@ static bool drop_early(struct Qdisc *sch, u32 packet_size)
 	struct pi_sched_data *q = qdisc_priv(sch);
 	u64 rnd;
 	u64 local_prob = q->vars.prob;
-	// Shouldn't we do q->vars.prob = 0 in pi_vars_init() ?
 	u32 mtu = psched_mtu(qdisc_dev(sch));
-
-	/* If we have fewer than 2 mtu-sized packets, disable drop_early,
-	 * similar to min_th in RED
-	 */
-	if (sch->qstats.backlog < 2 * mtu)
-		return false;
 
 	/* If bytemode is turned on, use packet size to compute new
 	 * probablity. Smaller packets will have lower drop prob in this case
@@ -144,11 +136,11 @@ out:
 }
 
 static const struct nla_policy pi_policy[TCA_PI_MAX + 1] = {
-	[TCA_PI_TARGET] = {.type = NLA_U32},
+	[TCA_PI_QREF] = {.type = NLA_U32},
 	[TCA_PI_LIMIT] = {.type = NLA_U32},
-	[TCA_PI_TUPDATE] = {.type = NLA_U32},
-	[TCA_PI_ALPHA] = {.type = NLA_U32},
-	[TCA_PI_BETA] = {.type = NLA_U32},
+	[TCA_PI_W] = {.type = NLA_U32},
+	[TCA_PI_A] = {.type = NLA_U32},
+	[TCA_PI_B] = {.type = NLA_U32},
 	[TCA_PI_ECN] = {.type = NLA_U32},
 	[TCA_PI_BYTEMODE] = {.type = NLA_U32},
 };
@@ -171,13 +163,13 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 	sch_tree_lock(sch);
 
 	/* should be number of packets */
-	if (tb[TCA_PI_TARGET])
-		q->params.target = nla_get_u32(tb[TCA_PI_TARGET]);
+	if (tb[TCA_PI_QREF])
+		q->params.qref = nla_get_u32(tb[TCA_PI_QREF]);
 
-	/* tupdate is in jiffies */
-	if (tb[TCA_PI_TUPDATE])
-		q->params.tupdate =
-			usecs_to_jiffies(nla_get_u32(tb[TCA_PI_TUPDATE]));
+	/* w is in jiffies */
+	if (tb[TCA_PI_W])
+		q->params.w =
+			usecs_to_jiffies(nla_get_u32(tb[TCA_PI_W]));
 
 	if (tb[TCA_PI_LIMIT]) {
 		u32 limit = nla_get_u32(tb[TCA_PI_LIMIT]);
@@ -186,13 +178,11 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 		sch->limit = limit;
 	}
 
-	/* needs to be scaled */
-	if (tb[TCA_PI_ALPHA])
-		q->params.alpha = nla_get_u32(tb[TCA_PI_ALPHA]);
+	if (tb[TCA_PI_A])
+		q->params.a = nla_get_u32(tb[TCA_PI_A]);
 
-	/* needs to be scaled */
-	if (tb[TCA_PI_BETA])
-		q->params.beta = nla_get_u32(tb[TCA_PI_BETA]);
+	if (tb[TCA_PI_A])
+		q->params.b = nla_get_u32(tb[TCA_PI_B]);
 
 	if (tb[TCA_PI_ECN])
 		q->params.ecn = nla_get_u32(tb[TCA_PI_ECN]);
@@ -222,24 +212,25 @@ static void calculate_probability(struct Qdisc *sch)
 	u32 qlen_old = q->vars.qlen_old;
 	s64 delta = 0;		/* determines the change in probability */
 	u64 oldprob;
-	u64 alpha, beta;
+	u64 a, b;
 	bool update_prob = true;
 
 	q->vars.qlen_old = qlen;
+	q->stats.qlen = qlen;
 
-	/* In the algorithm, alpha and beta are between 0 and 2 with typical
-	 * value for alpha as 0.125. In this implementation, we use values 0-32
-	 * passed from user space to represent this. Also, alpha and beta have
+	/* In the algorithm, a and b are between 0 and 2 with typical
+	 * value for a as 0.125. In this implementation, we use values 0-32
+	 * passed from user space to represent this. Also, a and b have
 	 * unit of HZ and need to be scaled before they can used to update
-	 * probability. alpha/beta are updated locally below by scaling down
+	 * probability. a/b are updated locally below by scaling down
 	 * by 16 to come to 0-2 range.
 	 */
-	alpha = ((u64)q->params.alpha * (MAX_PROB)) / PARAMETER_SCALE;
-	beta = ((u64)q->params.beta * (MAX_PROB)) / PARAMETER_SCALE;
+	a = ((u64)q->params.a * (MAX_PROB)) / PARAMETER_SCALE;
+	b = ((u64)q->params.b * (MAX_PROB)) / PARAMETER_SCALE;
 
-	/* alpha and beta should be between 0 and 32, in multiples of 1/16 */
-	delta += alpha * (u64)(qlen - q->params.target);
-	delta -= beta * (u64)(qlen_old - q->params.target);
+	/* a and b should be between 0 and 32, in multiples of 1/16 */
+	delta += a * (u64)(qlen - q->params.qref);
+	delta -= b * (u64)(qlen_old - q->params.qref);
 
 	oldprob = q->vars.prob;
 
@@ -274,9 +265,9 @@ static void pi_timer(struct timer_list *t)
 	spin_lock(root_lock);
 	calculate_probability(sch);
 
-	/* reset the timer to fire after 'tupdate'. tupdate is in jiffies. */
-	if (q->params.tupdate)
-		mod_timer(&q->adapt_timer, jiffies + q->params.tupdate);
+	/* reset the timer to fire after 'w'. w is in jiffies. */
+	if (q->params.w)
+		mod_timer(&q->adapt_timer, jiffies + q->params.w);
 	spin_unlock(root_lock);
 }
 
@@ -311,12 +302,12 @@ static int pi_dump(struct Qdisc *sch, struct sk_buff *skb)
 	if (!opts)
 		goto nla_put_failure;
 
-	if (nla_put_u32(skb, TCA_PI_TARGET, q->params.target) ||
+	if (nla_put_u32(skb, TCA_PI_QREF, q->params.qref) ||
 	    nla_put_u32(skb, TCA_PI_LIMIT, sch->limit) ||
-	    nla_put_u32(skb, TCA_PI_TUPDATE,
-			jiffies_to_usecs(q->params.tupdate)) ||
-	    nla_put_u32(skb, TCA_PI_ALPHA, q->params.alpha) ||
-	    nla_put_u32(skb, TCA_PI_BETA, q->params.beta) ||
+	    nla_put_u32(skb, TCA_PI_W,
+			jiffies_to_usecs(q->params.w)) ||
+	    nla_put_u32(skb, TCA_PI_A, q->params.a) ||
+	    nla_put_u32(skb, TCA_PI_B, q->params.b) ||
 	    nla_put_u32(skb, TCA_PI_ECN, q->params.ecn) ||
 	    nla_put_u32(skb, TCA_PI_BYTEMODE, q->params.bytemode))
 		goto nla_put_failure;
@@ -333,6 +324,7 @@ static int pi_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 	struct pi_sched_data *q = qdisc_priv(sch);
 	struct tc_pi_xstats st = { // Need to verify if all params are needed
 		.prob		= q->vars.prob,
+		.qlen		= q->stats.qlen,
 		.packets_in	= q->stats.packets_in,
 		.overlimit	= q->stats.overlimit,
 		.maxq		= q->stats.maxq,
@@ -364,7 +356,7 @@ static void pi_destroy(struct Qdisc *sch)
 {
 	struct pi_sched_data *q = qdisc_priv(sch);
 
-	q->params.tupdate = 0;
+	q->params.w = 0;
 	del_timer_sync(&q->adapt_timer);
 }
 
