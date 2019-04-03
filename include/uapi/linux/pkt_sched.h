@@ -941,15 +941,15 @@ struct tc_hhf_xstats {
 
 /* SURAJ: PI */
 enum {
-	TCA_PIE_UNSPEC,
-	TCA_PIE_TARGET,
-	TCA_PIE_LIMIT,
-	TCA_PIE_TUPDATE, /* TODO: need to change this to sampling frequency*/
-	TCA_PIE_ALPHA,
-	TCA_PIE_BETA,
-	TCA_PIE_ECN,
-	TCA_PIE_BYTEMODE,
-	__TCA_PIE_MAX
+	TCA_PI_UNSPEC,
+	TCA_PI_TARGET,
+	TCA_PI_LIMIT,
+	TCA_PI_TUPDATE, /* TODO: need to change this to sampling frequency*/
+	TCA_PI_ALPHA,
+	TCA_PI_BETA,
+	TCA_PI_ECN,
+	TCA_PI_BYTEMODE,
+	__TCA_PI_MAX
 };
 #define TCA_PI_MAX   (__TCA_PI_MAX - 1)
 
@@ -979,7 +979,7 @@ enum {
 #define TCA_PIE_MAX   (__TCA_PIE_MAX - 1)
 
 struct tc_pie_xstats {
-	__u64 prob;             /* current probability */
+	__u32 prob;             /* current probability */
 	__u32 delay;            /* current delay in ms */
 	__u32 avg_dq_rate;      /* current average dq_rate in bits/pie_time */
 	__u32 packets_in;       /* total number of packets enqueued */
@@ -1046,7 +1046,6 @@ enum {
 	TCA_CAKE_INGRESS,
 	TCA_CAKE_ACK_FILTER,
 	TCA_CAKE_SPLIT_GSO,
-	TCA_CAKE_FWMARK,
 	__TCA_CAKE_MAX
 };
 #define TCA_CAKE_MAX	(__TCA_CAKE_MAX - 1)
