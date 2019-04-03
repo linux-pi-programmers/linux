@@ -939,31 +939,6 @@ struct tc_hhf_xstats {
 	__u32	hh_cur_count;   /* number of current heavy-hitters */
 };
 
-/* SURAJ: PI */
-enum {
-	TCA_PI_UNSPEC,
-	TCA_PI_TARGET,
-	TCA_PI_LIMIT,
-	TCA_PI_TUPDATE, /* TODO: need to change this to sampling frequency*/
-	TCA_PI_ALPHA,
-	TCA_PI_BETA,
-	TCA_PI_ECN,
-	TCA_PI_BYTEMODE,
-	__TCA_PI_MAX
-};
-#define TCA_PI_MAX   (__TCA_PI_MAX - 1)
-
-struct tc_pi_xstats {
-	__u64 prob;             /* current probability */
-	__u32 delay;            /* current delay in ms */
-	__u32 avg_dq_rate;      /* current average dq_rate in bits/pie_time */
-	__u32 packets_in;       /* total number of packets enqueued */
-	__u32 dropped;          /* packets dropped due to pie_action */
-	__u32 overlimit;        /* dropped due to lack of space in queue */
-	__u32 maxq;             /* maximum queue size */
-	__u32 ecn_mark;         /* packets marked with ecn*/
-};
-
 /* PIE */
 enum {
 	TCA_PIE_UNSPEC,
@@ -982,6 +957,30 @@ struct tc_pie_xstats {
 	__u32 prob;             /* current probability */
 	__u32 delay;            /* current delay in ms */
 	__u32 avg_dq_rate;      /* current average dq_rate in bits/pie_time */
+	__u32 packets_in;       /* total number of packets enqueued */
+	__u32 dropped;          /* packets dropped due to pie_action */
+	__u32 overlimit;        /* dropped due to lack of space in queue */
+	__u32 maxq;             /* maximum queue size */
+	__u32 ecn_mark;         /* packets marked with ecn*/
+};
+
+/* PI */
+enum {
+	TCA_PI_UNSPEC,
+	TCA_PI_QREF,
+	TCA_PI_LIMIT,
+	TCA_PI_W,
+	TCA_PI_A,
+	TCA_PI_B,
+	TCA_PI_ECN,
+	TCA_PI_BYTEMODE,
+	__TCA_PI_MAX
+};
+#define TCA_PI_MAX   (__TCA_PI_MAX - 1)
+
+struct tc_pi_xstats {
+	__u64 prob;             /* current probability */
+	__u32 qlen;             /* current queue length in packets */
 	__u32 packets_in;       /* total number of packets enqueued */
 	__u32 dropped;          /* packets dropped due to pie_action */
 	__u32 overlimit;        /* dropped due to lack of space in queue */
