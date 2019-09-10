@@ -16,7 +16,7 @@
  *
  * References:
  * On designing improved controllers for AQM routers supporting TCP flows
- * DOI: 10.1109/INFCOM.2001.916670
+ * DOI: 10.1109/INFCOM.2001.9166706563521390000
  */
 
 #include <linux/module.h>
@@ -29,16 +29,15 @@
 #include <net/inet_ecn.h>
 
 #define MAX_PROB 0xffffffffffffffff
-#define PI_SCALE 8
-#define PARAMETER_SCALE 100000000
+#define PARAMETER_SCALE 10000000000000
 
 /* parameters used */
 struct pi_params {
 	u32 qref;   /* reference queue length in packets */
 	u32 w;		/* timer frequency (in jiffies) */
 	u32 limit;		/* number of packets that can be enqueued */
-	u32 a;		/* a and b are between 0 and 32 */
-	u32 b;		/* and are used for shift relative to 1 */
+	u64 a;		/* a and b are between 0 and 32 */
+	u64 b;		/* and are used for shift relative to 1 */
 	bool ecn;		/* true if ecn is enabled */
 	bool bytemode;		/* to scale drop early prob based on pkt size */
 };
@@ -70,8 +69,8 @@ struct pi_sched_data {
 
 static void pi_params_init(struct pi_params *params)
 {
-	params->a = 1822;
-	params->b = 1816;
+	params->a = 182200000;
+	params->b = 181600000;
 	params->w = usecs_to_jiffies(625 * USEC_PER_MSEC / 1000);	/* 6.25 ms */
 	params->limit = 1000;	/* default of 1000 packets */
 	params->qref = 50; /* reference queue length in packets */
@@ -139,8 +138,8 @@ static const struct nla_policy pi_policy[TCA_PI_MAX + 1] = {
 	[TCA_PI_QREF] = {.type = NLA_U32},
 	[TCA_PI_LIMIT] = {.type = NLA_U32},
 	[TCA_PI_W] = {.type = NLA_U32},
-	[TCA_PI_A] = {.type = NLA_U32},
-	[TCA_PI_B] = {.type = NLA_U32},
+	[TCA_PI_A] = {.type = NLA_U64},
+	[TCA_PI_B] = {.type = NLA_U64},
 	[TCA_PI_ECN] = {.type = NLA_U32},
 	[TCA_PI_BYTEMODE] = {.type = NLA_U32},
 };
@@ -179,10 +178,10 @@ static int pi_change(struct Qdisc *sch, struct nlattr *opt,
 	}
 
 	if (tb[TCA_PI_A])
-		q->params.a = nla_get_u32(tb[TCA_PI_A]);
+		q->params.a = nla_get_u64(tb[TCA_PI_A]);
 
 	if (tb[TCA_PI_A])
-		q->params.b = nla_get_u32(tb[TCA_PI_B]);
+		q->params.b = nla_get_u64(tb[TCA_PI_B]);
 
 	if (tb[TCA_PI_ECN])
 		q->params.ecn = nla_get_u32(tb[TCA_PI_ECN]);
@@ -213,10 +212,32 @@ static void calculate_probability(struct Qdisc *sch)
 	s64 delta = 0;		/* determines the change in probability */
 	u64 oldprob;
 	u64 a, b;
+	u64 param_a =q->params.a, param_b = q->params.b;
+	u64 mul_a = 1, mul_b=1;
 	bool update_prob = true;
 
 	q->vars.qlen_old = qlen;
 	q->stats.qlen = qlen;
+
+
+	/*
+	 * Depending on the precision of a and b, increment the scale.
+	 * For example, if the required value of 'a' is 1822 * 10^-8,
+	 * q->params.a would be 182200000. The logic below would result
+	 * in param_a being 1822 and mul_a being 10^5. This would mean
+	 * that the calculation in line 250 would be 
+	 * ((1822 * MAX_PROB) / 10^13) * 10^5 which is the value we want
+	 * 
+	*/
+	while(param_a %10 ==0) {
+		mul_a = mul_a *10;
+		param_a = param_a / 10;
+	}
+
+	while(param_b %10 ==0) {
+		mul_b = mul_b *10;
+		param_b = param_b / 10;
+	}
 
 	/* In the algorithm, a and b are between 0 and 2 with typical
 	 * value for a as 0.125. In this implementation, we use values 0-32
@@ -225,10 +246,9 @@ static void calculate_probability(struct Qdisc *sch)
 	 * probability. a/b are updated locally below by scaling down
 	 * by 16 to come to 0-2 range.
 	 */
-	a = ((u64)q->params.a * (MAX_PROB)) / PARAMETER_SCALE;
-	b = ((u64)q->params.b * (MAX_PROB)) / PARAMETER_SCALE;
+	a = ((param_a *MAX_PROB)/ PARAMETER_SCALE) * mul_a;
+	b = ((param_b *MAX_PROB)/ PARAMETER_SCALE) * mul_b;
 
-	/* a and b should be between 0 and 32, in multiples of 1/16 */
 	delta += a * (u64)(qlen - q->params.qref);
 	delta -= b * (u64)(qlen_old - q->params.qref);
 
@@ -306,8 +326,8 @@ static int pi_dump(struct Qdisc *sch, struct sk_buff *skb)
 	    nla_put_u32(skb, TCA_PI_LIMIT, sch->limit) ||
 	    nla_put_u32(skb, TCA_PI_W,
 			jiffies_to_usecs(q->params.w)) ||
-	    nla_put_u32(skb, TCA_PI_A, q->params.a) ||
-	    nla_put_u32(skb, TCA_PI_B, q->params.b) ||
+	    nla_put_u64_64bit(skb, TCA_PI_A, q->params.a, 0) ||
+	    nla_put_u64_64bit(skb, TCA_PI_B, q->params.b, 0) ||
 	    nla_put_u32(skb, TCA_PI_ECN, q->params.ecn) ||
 	    nla_put_u32(skb, TCA_PI_BYTEMODE, q->params.bytemode))
 		goto nla_put_failure;
